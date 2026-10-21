@@ -90,16 +90,16 @@ class TransferApp:
         frame_ip_row = tk.Frame(frame_env, bg="#090d16")
         frame_ip_row.pack(fill="x", pady=2)
 
-        # CORREGIDO: Se usa ipadx e ipady en lugar de ipx e ipy
         self.entry_ip = tk.Entry(frame_ip_row, font=("Segoe UI", 9), bg="#1e293b", fg="white", insertbackground="white", relief="flat")
         self.entry_ip.pack(side="left", fill="x", expand=True, ipadx=3, ipady=4, padx=(0, 5))
 
+        # CORREGIDO: Se usa ipady en lugar de ipy
         self.btn_buscar = tk.Button(
             frame_ip_row, text="🔍 Auto-Buscar",
             bg="#334155", fg="#f8fafc", font=("Segoe UI", 8, "bold"),
             relief="flat", cursor="hand2", command=self.buscar_pc_nueva
         )
-        self.btn_buscar.pack(side="right", ipy=4, ipadx=6)
+        self.btn_buscar.pack(side="right", ipady=4, ipadx=6)
 
         # Botones de selección de archivos y carpetas
         frame_botones_sel = tk.Frame(frame_env, bg="#090d16")
@@ -109,19 +109,19 @@ class TransferApp:
             frame_botones_sel, text="+ Carpeta", bg="#131c2e", fg="#38bdf8",
             font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2", command=self.agregar_carpeta
         )
-        btn_add_carp.pack(side="left", expand=True, fill="x", padx=(0, 2), ipy=4)
+        btn_add_carp.pack(side="left", expand=True, fill="x", padx=(0, 2), ipady=4)
 
         btn_add_arch = tk.Button(
             frame_botones_sel, text="+ Archivo(s)", bg="#131c2e", fg="#38bdf8",
             font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2", command=self.agregar_archivos
         )
-        btn_add_arch.pack(side="left", expand=True, fill="x", padx=(2, 2), ipy=4)
+        btn_add_arch.pack(side="left", expand=True, fill="x", padx=(2, 2), ipady=4)
 
         btn_del_item = tk.Button(
             frame_botones_sel, text="🗑 Quitar", bg="#131c2e", fg="#f87171",
             font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2", command=self.quitar_item
         )
-        btn_del_item.pack(side="right", expand=True, fill="x", padx=(2, 0), ipy=4)
+        btn_del_item.pack(side="right", expand=True, fill="x", padx=(2, 0), ipady=4)
 
         # Lista visual de elementos seleccionados
         frame_lista = tk.Frame(frame_env, bg="#090d16")
@@ -370,3 +370,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = TransferApp(root)
     root.mainloop()
+    
