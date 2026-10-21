@@ -64,8 +64,9 @@ class TransferApp:
         lbl_ip = tk.Label(frame_env, text="IP de la PC Nueva:", bg="#0f172a", fg="#cbd5e1", font=("Segoe UI", 9), anchor="w")
         lbl_ip.pack(fill="x", pady=2)
 
+        # CORREGIDO: Se usan ipadx e ipady correctamente
         self.entry_ip = tk.Entry(frame_env, font=("Segoe UI", 10), bg="#334155", fg="white", insertbackground="white", relief="flat")
-        self.entry_ip.pack(fill="x", pady=5, ipx=4, ipy=2)
+        self.entry_ip.pack(fill="x", pady=5, ipadx=4, ipady=2)
 
         self.btn_enviar = tk.Button(
             frame_env, text="Seleccionar Carpetas y Enviar",
