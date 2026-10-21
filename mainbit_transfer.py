@@ -27,7 +27,6 @@ class TransferApp:
         self.crear_interfaz()
 
     def crear_estilos(self):
-        # Estilo moderno para la barra de progreso
         style = ttk.Style()
         style.theme_use('clam')
         style.configure(
@@ -91,8 +90,9 @@ class TransferApp:
         frame_ip_row = tk.Frame(frame_env, bg="#090d16")
         frame_ip_row.pack(fill="x", pady=2)
 
+        # CORREGIDO: Se usa ipadx e ipady en lugar de ipx e ipy
         self.entry_ip = tk.Entry(frame_ip_row, font=("Segoe UI", 9), bg="#1e293b", fg="white", insertbackground="white", relief="flat")
-        self.entry_ip.pack(side="left", fill="x", expand=True, ipx=3, ipy=4, padx=(0, 5))
+        self.entry_ip.pack(side="left", fill="x", expand=True, ipadx=3, ipady=4, padx=(0, 5))
 
         self.btn_buscar = tk.Button(
             frame_ip_row, text="🔍 Auto-Buscar",
@@ -224,7 +224,6 @@ class TransferApp:
             while True:
                 conn, addr = server.accept()
                 
-                # Recibir peso total de la transferencia (8 bytes)
                 raw_total_bytes = conn.recv(8)
                 if not raw_total_bytes:
                     conn.close()
@@ -260,7 +259,6 @@ class TransferApp:
                             file_received += len(chunk)
                             received_bytes += len(chunk)
                             
-                            # Actualizar barra de progreso
                             pct = int((received_bytes / total_bytes) * 100) if total_bytes > 0 else 0
                             self.root.after(0, lambda p=pct: self.progress.config(value=p))
 
@@ -316,7 +314,6 @@ class TransferApp:
             archivos_a_enviar = []
             total_bytes = 0
 
-            # Pre-calcular lista y tamaño total exacto
             for ruta in rutas:
                 if os.path.isfile(ruta):
                     nombre_archivo = os.path.basename(ruta)
@@ -336,7 +333,6 @@ class TransferApp:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.connect((ip_destino, PORT_TRANSFER))
 
-            # Enviar el peso total primero (8 bytes)
             s.sendall(struct.pack("!Q", total_bytes))
 
             enviados_bytes = 0
@@ -349,7 +345,7 @@ class TransferApp:
 
                 with open(full_path, "rb") as f:
                     while True:
-                        chunk = f.read(1024 * 128) # Bloques grandes para máxima velocidad
+                        chunk = f.read(1024 * 128)
                         if not chunk:
                             break
                         s.sendall(chunk)
