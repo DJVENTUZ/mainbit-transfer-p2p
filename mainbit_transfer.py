@@ -1,373 +1,537 @@
+import ctypes
 import os
 import socket
 import struct
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk, Listbox, Scrollbar
+from tkinter import filedialog, messagebox, font as tkfont
 
 PORT_TRANSFER = 50008
 PORT_DISCOVER = 50009
+CHUNK = 128 * 1024
 
+# Paleta estilo iOS (modo oscuro)
+C = {
+    "bg": "#000000",
+    "card": "#1C1C1E",
+    "fill": "#2C2C2E",
+    "label": "#FFFFFF",
+    "label2": "#8E8E93",
+    "blue": "#0A84FF",
+    "green": "#30D158",
+    "red": "#FF453A",
+    "yellow": "#FFD60A",
+    "gray": "#3A3A3C",
+    "disabled": "#2C2C2E",
+}
+
+
+# ----------------------------------------------------------------------
+# Utilidades de red
+# ----------------------------------------------------------------------
+def recv_exact(sock, n):
+    """Lee exactamente n bytes (recv() puede devolver menos de lo pedido)."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("La conexión se cerró antes de tiempo.")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def obtener_ips_locales():
+    """Devuelve todas las IPv4 locales (funciona también con cable directo/APIPA)."""
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                ips.add(ip)
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))  # Falla sin gateway; por eso no es la única vía
+        ips.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    return sorted(ips)
+
+
+def ruta_segura(base, rel):
+    """Evita que un emisor escriba fuera de la carpeta de respaldo (../)."""
+    rel = rel.replace("\\", "/")
+    dest = os.path.normpath(os.path.join(base, *rel.split("/")))
+    if os.path.commonpath([base, dest]) != base:
+        raise ValueError(f"Ruta no permitida: {rel}")
+    return dest
+
+
+# ----------------------------------------------------------------------
+# Componentes visuales estilo iOS
+# ----------------------------------------------------------------------
+def round_rect(canvas, x1, y1, x2, y2, r, **kw):
+    r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+    pts = [x1 + r, y1, x1 + r, y1, x2 - r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+           x2, y1 + r, x2, y2 - r, x2, y2 - r, x2, y2, x2 - r, y2, x2 - r, y2,
+           x1 + r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y2 - r, x1, y1 + r,
+           x1, y1 + r, x1, y1]
+    return canvas.create_polygon(pts, smooth=True, **kw)
+
+
+def oscurecer(hex_color, f):
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % tuple(min(255, int(c * f)) for c in (r, g, b))
+
+
+class RoundedButton(tk.Canvas):
+    def __init__(self, parent, text, command, bg, fg="#FFFFFF", fondo_padre=None,
+                 font=None, height=44, width=100, radius=14):
+        super().__init__(parent, height=height, width=width, bg=fondo_padre,
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self.text, self.command, self.color, self.fg = text, command, bg, fg
+        self.font, self.radius, self.enabled = font, radius, True
+        self._actual = bg
+        self.bind("<Configure>", lambda e: self._dibujar())
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def _dibujar(self):
+        self.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        fill = self._actual if self.enabled else C["disabled"]
+        round_rect(self, 1, 1, w - 1, h - 1, self.radius, fill=fill, outline="")
+        self.create_text(w // 2, h // 2, text=self.text, font=self.font,
+                         fill=self.fg if self.enabled else C["label2"])
+
+    def _press(self, _e):
+        if self.enabled:
+            self._actual = oscurecer(self.color, 0.75)
+            self._dibujar()
+
+    def _release(self, e):
+        if not self.enabled:
+            return
+        self._actual = self.color
+        self._dibujar()
+        if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height():
+            self.command()
+
+    def set_enabled(self, valor):
+        self.enabled = valor
+        self.configure(cursor="hand2" if valor else "arrow")
+        self._dibujar()
+
+
+class Card(tk.Canvas):
+    """Tarjeta redondeada (estilo grouped list de iOS). Contenido en .inner"""
+
+    def __init__(self, parent, fondo_padre, fill=None, radius=18, pad=14):
+        super().__init__(parent, bg=fondo_padre, highlightthickness=0, bd=0)
+        self.fill, self.radius, self.pad = fill or C["card"], radius, pad
+        self.inner = tk.Frame(self, bg=self.fill)
+        self.win = self.create_window(pad, pad, window=self.inner, anchor="nw")
+        self.bind("<Configure>", self._relayout)
+        self.inner.bind("<Configure>", self._relayout)
+
+    def _relayout(self, _e=None):
+        w = self.winfo_width()
+        h = self.inner.winfo_reqheight() + 2 * self.pad
+        if int(self.cget("height")) != h:
+            self.config(height=h)
+        self.delete("bg")
+        round_rect(self, 0, 0, w, h, self.radius, fill=self.fill, outline="", tags="bg")
+        self.tag_lower("bg")
+        self.itemconfigure(self.win, width=max(1, w - 2 * self.pad))
+
+
+class Capsula(tk.Canvas):
+    """Barra de progreso tipo cápsula."""
+
+    def __init__(self, parent, fondo_padre):
+        super().__init__(parent, height=8, bg=fondo_padre, highlightthickness=0, bd=0)
+        self.valor = 0
+        self.bind("<Configure>", lambda e: self._dibujar())
+
+    def set(self, v):
+        self.valor = max(0, min(100, v))
+        self._dibujar()
+
+    def _dibujar(self):
+        self.delete("all")
+        w, h = self.winfo_width(), 8
+        round_rect(self, 0, 0, w, h, 4, fill=C["fill"], outline="")
+        if self.valor > 0:
+            round_rect(self, 0, 0, max(h, int(w * self.valor / 100)), h, 4,
+                       fill=C["blue"], outline="")
+
+
+# ----------------------------------------------------------------------
+# Aplicación
+# ----------------------------------------------------------------------
 class TransferApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Mainbit DataLink // iOS Edition")
-        self.root.geometry("500x680")
-        self.root.config(bg="#090d16")
+        self.root.title("Mainbit DataLink")
+        self.root.config(bg=C["bg"])
         self.root.resizable(False, False)
-        
-        # Efecto de transparencia translúcida estilo iOS (96%)
         try:
-            self.root.attributes('-alpha', 0.96)
-        except Exception:
+            self.root.attributes("-alpha", 0.98)
+        except tk.TclError:
             pass
 
+        fams = set(tkfont.families())
+        self.F = next((f for f in ("SF Pro Display", "SF Pro Text",
+                                   "Segoe UI Variable Display", "Segoe UI Variable Text",
+                                   "Segoe UI") if f in fams), "Helvetica")
+
         self.rutas_seleccionadas = []
-        self.crear_estilos()
+        self.stop_discovery = threading.Event()
         self.crear_interfaz()
 
-    def crear_estilos(self):
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure(
-            "Custom.Horizontal.TProgressbar",
-            troughcolor='#1e293b',
-            background='#38bdf8',
-            darkcolor='#0284c7',
-            lightcolor='#38bdf8',
-            bordercolor='#1e293b',
-            thickness=8
-        )
+        self.root.update_idletasks()
+        self.root.geometry(f"480x{self.root.winfo_reqheight()}")
+
+    # ---------------- helpers UI ----------------
+    def ui(self, fn, *args, **kw):
+        """Ejecuta fn en el hilo de la interfaz (seguro desde hilos secundarios)."""
+        self.root.after(0, lambda: fn(*args, **kw))
+
+    def set_estado(self, texto, color=None):
+        self.lbl_estado.config(text=texto, fg=color or C["label2"])
+
+    def set_progreso(self, pct):
+        self.progress.set(pct)
+        self.lbl_pct.config(text=f"{pct}%")
+
+    def seccion(self, texto):
+        tk.Label(self.root, text=texto.upper(), font=(self.F, 9), bg=C["bg"],
+                 fg=C["label2"], anchor="w").pack(fill="x", padx=30, pady=(12, 4))
 
     def crear_interfaz(self):
-        # --- HEADER / LOGO MAINBIT ---
-        header_frame = tk.Frame(self.root, bg="#090d16")
-        header_frame.pack(fill="x", padx=20, pady=(15, 5))
+        F = self.F
+        # --- Encabezado (Large Title) ---
+        head = tk.Frame(self.root, bg=C["bg"])
+        head.pack(fill="x", padx=24, pady=(22, 4))
+        tk.Label(head, text="DataLink", font=(F, 26, "bold"), bg=C["bg"],
+                 fg=C["label"]).pack(side="left")
+        tk.Label(head, text="MAINBIT", font=(F, 9, "bold"), bg=C["fill"],
+                 fg=C["blue"], padx=10, pady=4).pack(side="right")
 
-        lbl_logo = tk.Label(
-            header_frame, text="M A I N B I T",
-            font=("Segoe UI", 16, "bold"), bg="#090d16", fg="#38bdf8"
-        )
-        lbl_logo.pack(side="left")
+        # --- Estado ---
+        card_est = Card(self.root, C["bg"], radius=14, pad=12)
+        card_est.pack(fill="x", padx=20, pady=(8, 4))
+        self.lbl_estado = tk.Label(card_est.inner, text="Listo. Elige el rol de este equipo.",
+                                   font=(F, 10), bg=C["card"], fg=C["label2"],
+                                   anchor="w", justify="left", wraplength=400)
+        self.lbl_estado.pack(fill="x")
 
-        lbl_badge = tk.Label(
-            header_frame, text="DATALINK PRO",
-            font=("Segoe UI", 8, "bold"), bg="#1e293b", fg="#4ade80", padx=8, pady=3
-        )
-        lbl_badge.pack(side="right")
+        # --- Receptor ---
+        self.seccion("PC nueva · Receptor")
+        card_rec = Card(self.root, C["bg"])
+        card_rec.pack(fill="x", padx=20)
+        self.btn_servidor = RoundedButton(
+            card_rec.inner, "Activar modo receptor", self.iniciar_servidor_hilo,
+            C["blue"], fondo_padre=C["card"], font=(F, 11, "bold"))
+        self.btn_servidor.pack(fill="x")
 
-        # --- ESTADO / INFO ---
-        self.lbl_estado = tk.Label(
-            self.root, text="Selecciona el rol para comenzar la migración",
-            font=("Segoe UI", 9), bg="#131c2e", fg="#94a3b8", padx=15, pady=8, relief="flat"
-        )
-        self.lbl_estado.pack(fill="x", padx=20, pady=5)
+        # --- Emisor ---
+        self.seccion("PC vieja · Emisor")
+        card_env = Card(self.root, C["bg"])
+        card_env.pack(fill="x", padx=20)
+        inn = card_env.inner
 
-        # --- SECCIÓN 1: PC NUEVA (RECEPTOR) ---
-        frame_rec = tk.LabelFrame(
-            self.root, text=" PC Nueva (Receptor) ",
-            font=("Segoe UI", 9, "bold"), bg="#090d16", fg="#38bdf8", padx=12, pady=6
-        )
-        frame_rec.pack(fill="x", padx=20, pady=5)
+        tk.Label(inn, text="IP de la PC nueva", font=(F, 9), bg=C["card"],
+                 fg=C["label2"], anchor="w").pack(fill="x", pady=(0, 4))
+        fila_ip = tk.Frame(inn, bg=C["card"])
+        fila_ip.pack(fill="x")
+        self.entry_ip = tk.Entry(fila_ip, font=(F, 11), bg=C["fill"], fg=C["label"],
+                                 insertbackground=C["label"], relief="flat", bd=0)
+        self.entry_ip.pack(side="left", fill="x", expand=True, ipady=10, padx=(0, 8))
+        self.btn_buscar = RoundedButton(fila_ip, "Auto-buscar", self.buscar_pc_nueva,
+                                        C["gray"], fondo_padre=C["card"],
+                                        font=(F, 9, "bold"), height=38, width=100, radius=12)
+        self.btn_buscar.pack(side="right")
 
-        self.btn_servidor = tk.Button(
-            frame_rec, text="Activar Modo Receptor (Esperar Datos)",
-            bg="#0284c7", fg="white", font=("Segoe UI", 9, "bold"),
-            relief="flat", cursor="hand2", command=self.iniciar_servidor_hilo
-        )
-        self.btn_servidor.pack(fill="x", pady=3, ipady=3)
+        fila_sel = tk.Frame(inn, bg=C["card"])
+        fila_sel.pack(fill="x", pady=(10, 8))
+        for i in range(3):
+            fila_sel.columnconfigure(i, weight=1, uniform="b")
+        for i, (txt, cmd, col) in enumerate((
+                ("+ Carpeta", self.agregar_carpeta, C["fill"]),
+                ("+ Archivos", self.agregar_archivos, C["fill"]),
+                ("Quitar", self.quitar_item, C["fill"]))):
+            b = RoundedButton(fila_sel, txt, cmd, col,
+                              fg=C["red"] if txt == "Quitar" else C["blue"],
+                              fondo_padre=C["card"], font=(F, 9, "bold"), height=36, radius=12)
+            b.grid(row=0, column=i, sticky="ew", padx=3)
 
-        # --- SECCIÓN 2: PC VIEJA (EMISOR) ---
-        frame_env = tk.LabelFrame(
-            self.root, text=" PC Vieja (Emisor y Selección) ",
-            font=("Segoe UI", 9, "bold"), bg="#090d16", fg="#4ade80", padx=12, pady=8
-        )
-        frame_env.pack(fill="x", padx=20, pady=5)
+        marco_lista = tk.Frame(inn, bg=C["fill"])
+        marco_lista.pack(fill="x")
+        self.listbox = tk.Listbox(marco_lista, height=4, bg=C["fill"], fg=C["label"],
+                                  font=(F, 9), selectbackground=C["blue"],
+                                  relief="flat", highlightthickness=0, bd=0, activestyle="none")
+        self.listbox.pack(side="left", fill="both", expand=True, padx=8, pady=6)
+        sb = tk.Scrollbar(marco_lista, orient="vertical", command=self.listbox.yview)
+        sb.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=sb.set)
 
-        lbl_ip = tk.Label(frame_env, text="IP de la PC Nueva:", bg="#090d16", fg="#cbd5e1", font=("Segoe UI", 8), anchor="w")
-        lbl_ip.pack(fill="x", pady=1)
+        self.btn_enviar = RoundedButton(inn, "Iniciar transferencia por Ethernet",
+                                        self.iniciar_envio_hilo, C["green"],
+                                        fondo_padre=C["card"], font=(F, 11, "bold"))
+        self.btn_enviar.pack(fill="x", pady=(10, 0))
 
-        frame_ip_row = tk.Frame(frame_env, bg="#090d16")
-        frame_ip_row.pack(fill="x", pady=2)
+        # --- Progreso ---
+        fila_prog = tk.Frame(self.root, bg=C["bg"])
+        fila_prog.pack(fill="x", padx=30, pady=(16, 4))
+        self.progress = Capsula(fila_prog, C["bg"])
+        self.progress.pack(side="left", fill="x", expand=True)
+        self.lbl_pct = tk.Label(fila_prog, text="0%", font=(F, 9, "bold"), width=5,
+                                bg=C["bg"], fg=C["label2"])
+        self.lbl_pct.pack(side="right")
 
-        self.entry_ip = tk.Entry(frame_ip_row, font=("Segoe UI", 9), bg="#1e293b", fg="white", insertbackground="white", relief="flat")
-        self.entry_ip.pack(side="left", fill="x", expand=True, ipadx=3, ipady=4, padx=(0, 5))
+        tk.Label(self.root, text="Desarrollado para Mainbit por Gabriel Hernández Arroyo",
+                 font=(F, 8), bg=C["bg"], fg="#636366").pack(pady=(8, 14))
 
-        # CORREGIDO: Se usa ipady en lugar de ipy
-        self.btn_buscar = tk.Button(
-            frame_ip_row, text="🔍 Auto-Buscar",
-            bg="#334155", fg="#f8fafc", font=("Segoe UI", 8, "bold"),
-            relief="flat", cursor="hand2", command=self.buscar_pc_nueva
-        )
-        self.btn_buscar.pack(side="right", ipady=4, ipadx=6)
-
-        # Botones de selección de archivos y carpetas
-        frame_botones_sel = tk.Frame(frame_env, bg="#090d16")
-        frame_botones_sel.pack(fill="x", pady=5)
-
-        btn_add_carp = tk.Button(
-            frame_botones_sel, text="+ Carpeta", bg="#131c2e", fg="#38bdf8",
-            font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2", command=self.agregar_carpeta
-        )
-        btn_add_carp.pack(side="left", expand=True, fill="x", padx=(0, 2), ipady=4)
-
-        btn_add_arch = tk.Button(
-            frame_botones_sel, text="+ Archivo(s)", bg="#131c2e", fg="#38bdf8",
-            font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2", command=self.agregar_archivos
-        )
-        btn_add_arch.pack(side="left", expand=True, fill="x", padx=(2, 2), ipady=4)
-
-        btn_del_item = tk.Button(
-            frame_botones_sel, text="🗑 Quitar", bg="#131c2e", fg="#f87171",
-            font=("Segoe UI", 8, "bold"), relief="flat", cursor="hand2", command=self.quitar_item
-        )
-        btn_del_item.pack(side="right", expand=True, fill="x", padx=(2, 0), ipady=4)
-
-        # Lista visual de elementos seleccionados
-        frame_lista = tk.Frame(frame_env, bg="#090d16")
-        frame_lista.pack(fill="x", pady=3)
-
-        self.listbox = Listbox(
-            frame_lista, height=4, bg="#131c2e", fg="#f8fafc", font=("Segoe UI", 8),
-            selectbackground="#0284c7", relief="flat", highlightthickness=0
-        )
-        self.listbox.pack(side="left", fill="both", expand=True)
-
-        scrollbar = Scrollbar(frame_lista, orient="vertical", command=self.listbox.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.listbox.config(yscrollcommand=scrollbar.set)
-
-        self.btn_enviar = tk.Button(
-            frame_env, text="Iniciar Transferencia Ultrarrápida",
-            bg="#16a34a", fg="white", font=("Segoe UI", 9, "bold"),
-            relief="flat", cursor="hand2", command=self.iniciar_envio_hilo
-        )
-        self.btn_enviar.pack(fill="x", pady=6, ipady=3)
-
-        # --- BARRA DE PROGRESO ---
-        self.progress = ttk.Progressbar(
-            self.root, orient="horizontal", length=440, mode="determinate", style="Custom.Horizontal.TProgressbar"
-        )
-        self.progress.pack(pady=8)
-
-        # --- FOOTER / FIRMA ---
-        footer_frame = tk.Frame(self.root, bg="#090d16")
-        footer_frame.pack(fill="x", padx=20, pady=(0, 10))
-
-        lbl_firma = tk.Label(
-            footer_frame, text="Desarrollado para Mainbit por Gabriel Hernández Arroyo",
-            font=("Segoe UI", 7), bg="#090d16", fg="#64748b"
-        )
-        lbl_firma.pack(side="center")
-
+    # ---------------- selección ----------------
     def agregar_carpeta(self):
-        dir_sel = filedialog.askdirectory(title="Selecciona carpeta")
-        if dir_sel and dir_sel not in self.rutas_seleccionadas:
-            self.rutas_seleccionadas.append(dir_sel)
-            self.listbox.insert(tk.END, f"[Carpeta] {dir_sel}")
+        d = filedialog.askdirectory(title="Selecciona carpeta de origen")
+        if d and d not in self.rutas_seleccionadas:
+            self.rutas_seleccionadas.append(d)
+            self.listbox.insert(tk.END, f"[Carpeta] {d}")
 
     def agregar_archivos(self):
-        files_sel = filedialog.askopenfilenames(title="Selecciona archivos")
-        for f in files_sel:
+        for f in filedialog.askopenfilenames(title="Selecciona archivos sueltos"):
             if f and f not in self.rutas_seleccionadas:
                 self.rutas_seleccionadas.append(f)
                 self.listbox.insert(tk.END, f"[Archivo] {f}")
 
     def quitar_item(self):
-        seleccion = self.listbox.curselection()
-        if seleccion:
-            index = seleccion[0]
-            self.listbox.delete(index)
-            del self.rutas_seleccionadas[index]
+        sel = self.listbox.curselection()
+        if sel:
+            self.listbox.delete(sel[0])
+            del self.rutas_seleccionadas[sel[0]]
 
-    def obtener_ip_local(self):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return "127.0.0.1"
-
-    # --- RECEPTOR (PC NUEVA) ---
+    # ---------------- RECEPTOR ----------------
     def iniciar_servidor_hilo(self):
-        ip_actual = self.obtener_ip_local()
-        self.lbl_estado.config(text=f"Escuchando en IP: {ip_actual} (Esperando datos...)", fg="#38bdf8")
-        self.btn_servidor.config(state="disabled", bg="#334155")
+        ips = obtener_ips_locales()
+        texto = " / ".join(ips) if ips else "no detectada"
+        self.set_estado(f"Receptor activo. IP: {texto}", C["blue"])
+        self.btn_servidor.set_enabled(False)
+        self.set_progreso(0)
+        self.stop_discovery.clear()
         threading.Thread(target=self.ejecutar_servidor_archivos, daemon=True).start()
         threading.Thread(target=self.ejecutar_servidor_discovery, daemon=True).start()
 
     def ejecutar_servidor_discovery(self):
-        disc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        disc_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            disc_sock.bind(('', PORT_DISCOVER))
-            while True:
-                data, addr = disc_sock.recvfrom(1024)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", PORT_DISCOVER))
+            sock.settimeout(1.0)
+            while not self.stop_discovery.is_set():
+                try:
+                    data, addr = sock.recvfrom(1024)
+                except socket.timeout:
+                    continue
                 if data == b"MAINBIT_DISCOVER":
-                    disc_sock.sendto(b"MAINBIT_HERE", addr)
-        except Exception:
+                    sock.sendto(b"MAINBIT_HERE", addr)
+        except OSError:
             pass
+        finally:
+            sock.close()
 
     def ejecutar_servidor_archivos(self):
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        backup_dir = os.path.join(desktop, "BACKUP_MIGRACION")
-        os.makedirs(backup_dir, exist_ok=True)
-
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind(("0.0.0.0", PORT_TRANSFER))
-        server.listen(5)
-
+        backup_dir = os.path.abspath(
+            os.path.join(os.path.expanduser("~"), "Desktop", "BACKUP_MIGRACION"))
+        server = None
         try:
-            while True:
-                conn, addr = server.accept()
-                
-                raw_total_bytes = conn.recv(8)
-                if not raw_total_bytes:
-                    conn.close()
-                    break
-                total_bytes = struct.unpack("!Q", raw_total_bytes)[0]
-                
-                received_bytes = 0
-                self.root.after(0, lambda: self.lbl_estado.config(text=f"Conectado con {addr[0]}. Recibiendo datos...", fg="#facc15"))
+            os.makedirs(backup_dir, exist_ok=True)
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("0.0.0.0", PORT_TRANSFER))
+            server.listen(1)
 
+            conn, addr = server.accept()
+            conn.settimeout(60)
+            with conn:
+                total = struct.unpack("!Q", recv_exact(conn, 8))[0]
+                self.ui(self.set_estado, f"Conectado con {addr[0]}. Transfiriendo...", C["yellow"])
+
+                recibidos, ultimo = 0, -1
                 while True:
-                    raw_path_len = conn.recv(4)
-                    if not raw_path_len:
+                    plen = struct.unpack("!I", recv_exact(conn, 4))[0]
+                    if plen == 0:
                         break
-                    path_len = struct.unpack("!I", raw_path_len)[0]
-                    if path_len == 0:
-                        break
+                    rel = recv_exact(conn, plen).decode("utf-8")
+                    size = struct.unpack("!Q", recv_exact(conn, 8))[0]
 
-                    rel_path = conn.recv(path_len).decode('utf-8')
-                    raw_file_size = conn.recv(8)
-                    file_size = struct.unpack("!Q", raw_file_size)[0]
+                    dest = ruta_segura(backup_dir, rel)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
 
-                    dest_path = os.path.join(backup_dir, rel_path)
-                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-
-                    file_received = 0
-                    with open(dest_path, "wb") as f:
-                        while file_received < file_size:
-                            chunk_size = min(1024 * 128, file_size - file_received)
-                            chunk = conn.recv(chunk_size)
+                    restante = size
+                    with open(dest, "wb") as f:
+                        while restante > 0:
+                            chunk = conn.recv(min(CHUNK, restante))
                             if not chunk:
-                                break
+                                raise ConnectionError(f"Conexión interrumpida en: {rel}")
                             f.write(chunk)
-                            file_received += len(chunk)
-                            received_bytes += len(chunk)
-                            
-                            pct = int((received_bytes / total_bytes) * 100) if total_bytes > 0 else 0
-                            self.root.after(0, lambda p=pct: self.progress.config(value=p))
+                            restante -= len(chunk)
+                            recibidos += len(chunk)
+                            pct = int(recibidos * 100 / total) if total else 0
+                            if pct != ultimo:
+                                ultimo = pct
+                                self.ui(self.set_progreso, pct)
 
-                conn.close()
-                self.root.after(0, lambda: messagebox.showinfo("Éxito", f"¡Migración completada con éxito!\nGuardado en:\n{backup_dir}"))
-                self.root.after(0, lambda: self.lbl_estado.config(text="¡Transferencia finalizada!", fg="#4ade80"))
-                break
+                conn.sendall(b"OK")  # Confirmación para el emisor
+
+            self.ui(self.set_progreso, 100)
+            self.ui(self.set_estado, "¡Migración completada!", C["green"])
+            self.ui(messagebox.showinfo, "Éxito",
+                    f"¡Migración finalizada!\nDirectorio de respaldo:\n{backup_dir}")
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Error en recepción: {str(e)}"))
+            msg = str(e)
+            self.ui(self.set_estado, "Error en el receptor", C["red"])
+            self.ui(messagebox.showerror, "Error crítico", f"Fallo en el receptor:\n{msg}")
+        finally:
+            self.stop_discovery.set()
+            if server:
+                server.close()
+            self.ui(self.btn_servidor.set_enabled, True)
 
-    # --- EMISOR (PC VIEJA) ---
+    # ---------------- EMISOR ----------------
     def buscar_pc_nueva(self):
-        self.lbl_estado.config(text="Buscando PC nueva en la red...", fg="#facc15")
-        self.root.update()
+        self.set_estado("Buscando equipo receptor en la red local...", C["yellow"])
+        self.btn_buscar.set_enabled(False)
+        threading.Thread(target=self._escanear, daemon=True).start()
 
-        def escanear():
+    def _escanear(self):
+        encontrada = None
+        for ip in obtener_ips_locales() or [""]:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                s.settimeout(3.0)
-                s.sendto(b"MAINBIT_DISCOVER", ('<broadcast>', PORT_DISCOVER))
-                data, addr = s.recvfrom(1024)
-                if data == b"MAINBIT_HERE":
-                    ip_encontrada = addr[0]
-                    self.root.after(0, lambda: self.entry_ip.delete(0, tk.END))
-                    self.root.after(0, lambda: self.entry_ip.insert(0, ip_encontrada))
-                    self.root.after(0, lambda: self.lbl_estado.config(text=f"¡PC Nueva detectada en {ip_encontrada}!", fg="#4ade80"))
+                s.bind((ip, 0))  # Sale por cada interfaz, incluido el cable directo
+                s.settimeout(1.5)
+                s.sendto(b"MAINBIT_DISCOVER", ("255.255.255.255", PORT_DISCOVER))
+                while True:
+                    data, addr = s.recvfrom(1024)
+                    if data == b"MAINBIT_HERE":
+                        encontrada = addr[0]
+                        break
+            except OSError:
+                pass
+            finally:
                 s.close()
-            except Exception:
-                self.root.after(0, lambda: messagebox.showwarning("Aviso", "No se encontró automáticamente a la PC nueva."))
-                self.root.after(0, lambda: self.lbl_estado.config(text="Búsqueda automática agotada", fg="#fef2f2"))
+            if encontrada:
+                break
 
-        threading.Thread(target=escanear, daemon=True).start()
+        if encontrada:
+            self.ui(self.entry_ip.delete, 0, tk.END)
+            self.ui(self.entry_ip.insert, 0, encontrada)
+            self.ui(self.set_estado, f"Enlazado con {encontrada}", C["green"])
+        else:
+            self.ui(self.set_estado, "Sin respuesta del receptor", C["red"])
+            self.ui(messagebox.showwarning, "Aviso",
+                    "No se detectó al receptor. Verifica el cable, que el receptor esté "
+                    "activo y que la red esté como 'Privada'. También puedes escribir la IP a mano.")
+        self.ui(self.btn_buscar.set_enabled, True)
 
     def iniciar_envio_hilo(self):
-        ip_destino = self.entry_ip.get().strip()
-        if not ip_destino:
+        ip = self.entry_ip.get().strip()
+        if not ip:
             messagebox.showerror("Error", "Ingresa o busca la IP de la PC nueva.")
             return
-
         if not self.rutas_seleccionadas:
-            messagebox.showwarning("Aviso", "No hay archivos o carpetas seleccionados.")
+            messagebox.showwarning("Aviso", "Agrega al menos un archivo o carpeta.")
             return
+        self.btn_enviar.set_enabled(False)
+        self.set_progreso(0)
+        self.set_estado("Analizando archivos y transmitiendo...", C["yellow"])
+        threading.Thread(target=self.ejecutar_envio,
+                         args=(ip, list(self.rutas_seleccionadas)), daemon=True).start()
 
-        self.btn_enviar.config(state="disabled", bg="#334155")
-        self.progress['value'] = 0
-        self.lbl_estado.config(text="Calculando archivos y enviando...", fg="#facc15")
-        
-        threading.Thread(target=self.ejecutar_envio, args=(ip_destino, self.rutas_seleccionadas), daemon=True).start()
-
-    def ejecutar_envio(self, ip_destino, rutas):
+    def ejecutar_envio(self, ip, rutas):
+        s = None
         try:
-            archivos_a_enviar = []
-            total_bytes = 0
+            archivos, omitidos, total = [], 0, 0
+
+            def registrar(full, rel):
+                nonlocal omitidos, total
+                try:
+                    size = os.path.getsize(full)
+                    with open(full, "rb"):
+                        pass
+                except OSError:
+                    omitidos += 1  # bloqueado / sin permisos
+                    return
+                archivos.append((full, rel.replace(os.sep, "/"), size))
+                total += size
 
             for ruta in rutas:
                 if os.path.isfile(ruta):
-                    nombre_archivo = os.path.basename(ruta)
-                    tamanio = os.path.getsize(ruta)
-                    archivos_a_enviar.append((ruta, nombre_archivo, tamanio))
-                    total_bytes += tamanio
+                    registrar(ruta, os.path.basename(ruta))
                 elif os.path.isdir(ruta):
-                    for root_dir, dirs, files in os.walk(ruta):
-                        for file in files:
-                            full_path = os.path.join(root_dir, file)
-                            rel_dir = os.path.relpath(root_dir, os.path.dirname(ruta))
-                            rel_path = os.path.join(rel_dir, file)
-                            tamanio = os.path.getsize(full_path)
-                            archivos_a_enviar.append((full_path, rel_path, tamanio))
-                            total_bytes += tamanio
+                    raiz = (os.path.basename(os.path.normpath(ruta))
+                            or ruta.rstrip(":\\/").replace(":", "") or "RAIZ")
+                    for carpeta, _dirs, files in os.walk(ruta):
+                        for nombre in files:
+                            full = os.path.join(carpeta, nombre)
+                            registrar(full, os.path.join(raiz, os.path.relpath(full, ruta)))
 
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((ip_destino, PORT_TRANSFER))
+            if not archivos:
+                raise ValueError("No hay archivos legibles para enviar.")
 
-            s.sendall(struct.pack("!Q", total_bytes))
+            s = socket.create_connection((ip, PORT_TRANSFER), timeout=10)
+            s.settimeout(60)
+            s.sendall(struct.pack("!Q", total))
 
-            enviados_bytes = 0
-            for full_path, rel_path, file_size in archivos_a_enviar:
-                path_bytes = rel_path.encode('utf-8')
+            enviados, ultimo = 0, -1
+            for full, rel, size in archivos:
+                pb = rel.encode("utf-8")
+                s.sendall(struct.pack("!I", len(pb)) + pb + struct.pack("!Q", size))
 
-                s.sendall(struct.pack("!I", len(path_bytes)))
-                s.sendall(path_bytes)
-                s.sendall(struct.pack("!Q", file_size))
-
-                with open(full_path, "rb") as f:
-                    while True:
-                        chunk = f.read(1024 * 128)
+                restante = size
+                with open(full, "rb") as f:
+                    while restante > 0:
+                        chunk = f.read(min(CHUNK, restante))
                         if not chunk:
-                            break
+                            raise IOError(f"El archivo cambió durante el envío: {rel}")
                         s.sendall(chunk)
-                        enviados_bytes += len(chunk)
-
-                        pct = int((enviados_bytes / total_bytes) * 100) if total_bytes > 0 else 0
-                        self.root.after(0, lambda p=pct: self.progress.config(value=p))
+                        restante -= len(chunk)
+                        enviados += len(chunk)
+                        pct = int(enviados * 100 / total) if total else 0
+                        if pct != ultimo:
+                            ultimo = pct
+                            self.ui(self.set_progreso, pct)
 
             s.sendall(struct.pack("!I", 0))
-            s.close()
+            s.settimeout(30)
+            if recv_exact(s, 2) != b"OK":
+                raise ConnectionError("El receptor no confirmó la recepción.")
 
-            self.root.after(0, lambda: messagebox.showinfo("Éxito", "¡Archivos transferidos exitosamente a la PC nueva!"))
-            self.root.after(0, lambda: self.lbl_estado.config(text="¡Envío completado al 100%!", fg="#4ade80"))
-            self.root.after(0, lambda: self.btn_enviar.config(state="normal", bg="#16a34a"))
-
+            self.ui(self.set_progreso, 100)
+            self.ui(self.set_estado, "¡Envío completado!", C["green"])
+            extra = f"\n\nArchivos omitidos (bloqueados): {omitidos}" if omitidos else ""
+            self.ui(messagebox.showinfo, "Éxito",
+                    f"¡{len(archivos)} archivos transferidos a la PC nueva!{extra}")
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Error en envío:\n{str(e)}"))
-            self.root.after(0, lambda: self.lbl_estado.config(text="Error de transferencia", fg="#fef2f2"))
-            self.root.after(0, lambda: self.btn_enviar.config(state="normal", bg="#16a34a"))
+            msg = str(e)
+            self.ui(self.set_estado, "Error crítico en red", C["red"])
+            self.ui(messagebox.showerror, "Error crítico", f"Fallo durante la transmisión:\n{msg}")
+        finally:
+            if s:
+                s.close()
+            self.ui(self.btn_enviar.set_enabled, True)
+
 
 if __name__ == "__main__":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # Texto nítido en Windows
+    except Exception:
+        pass
     root = tk.Tk()
-    app = TransferApp(root)
+    TransferApp(root)
     root.mainloop()
-    
